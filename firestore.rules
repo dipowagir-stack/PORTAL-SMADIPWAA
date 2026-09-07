@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwnerOrSupervisor(resourceData) {
+      return request.auth.uid == resourceData.teacherId || request.auth.uid == resourceData.principalId;
+    }
+
+    match /supervisions/{supervisionId} {
+      allow read: if isAuthenticated() && isOwnerOrSupervisor(resource.data);
+      allow create: if isAuthenticated() && request.auth.uid == request.resource.data.createdBy;
+      allow update: if isAuthenticated() && isOwnerOrSupervisor(resource.data)
+                    && request.resource.data.tenantId == resource.data.tenantId
+                    && request.resource.data.teacherId == resource.data.teacherId
+                    && request.resource.data.principalId == resource.data.principalId;
+      allow delete: if false; // Only soft delete or admin via backend
+    }
+
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

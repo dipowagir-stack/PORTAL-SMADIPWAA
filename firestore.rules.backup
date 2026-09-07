@@ -1,0 +1,765 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ========================================================================
+    // RBAC (Role-Based Access Control) Permission Checker
+    // ========================================================================
+    
+    function isPlatformAdmin() {
+      return hasAnyRole(['platform_admin', 'platform_support', 'platform_engineer', 'super_admin']);
+    }
+
+    function canAccessTenant(tenantId) {
+      // TODO: Migration Gap - tenant_memberships uses random IDs instead of composite keys.
+      // Firestore rules cannot query across collections with where clauses.
+      // Relying on application-level TenantGuard & tenant-scoped queries for now.
+      return true;
+    }
+
+    function hasPermission(perm) {
+      let doc = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      let user = doc != null ? doc.data : null;
+      let role = user != null ? user.role : '';
+      let hasPrimary = exists(/databases/$(database)/documents/role_permissions/$(role + '_' + perm));
+      let hasAdd0 = (user != null && user.get('additionalRoles', []).size() > 0) && exists(/databases/$(database)/documents/role_permissions/$(user.additionalRoles[0] + '_' + perm));
+      let hasAdd1 = (user != null && user.get('additionalRoles', []).size() > 1) && exists(/databases/$(database)/documents/role_permissions/$(user.additionalRoles[1] + '_' + perm));
+      let hasAdd2 = (user != null && user.get('additionalRoles', []).size() > 2) && exists(/databases/$(database)/documents/role_permissions/$(user.additionalRoles[2] + '_' + perm));
+      return hasPrimary || hasAdd0 || hasAdd1 || hasAdd2;
+    }
+    
+    // ========================================================================
+    // ROLE CHECKER COMPATIBILITY LAYER
+    // ========================================================================
+    function hasAnyRole(rolesList) {
+      let doc = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      let user = doc != null ? doc.data : null;
+      return user != null && (user.role in rolesList || user.get('additionalRoles', []).hasAny(rolesList));
+    }
+
+    // ========================================================================
+    
+    // ========================================================================
+    // HISTORICAL DATA PROTECTION
+    // ========================================================================
+    function isPeriodActive(periodId) {
+      let p = get(/databases/$(database)/documents/academic_semesters/$(periodId));
+      return p == null || p.data == null || p.data.state == 'ACTIVE' || p.data.state == 'PLANNING';
+    }
+    function canEditHistorical(domain) {
+      return hasPermission(domain + ':historical:edit') || hasAnyRole(['super_admin']);
+    }
+    function isDataMutable(domain, periodId) {
+      return periodId == null || isPeriodActive(periodId) || canEditHistorical(domain);
+    }
+
+    // BUSINESS COLLECTIONS
+    // ========================================================================
+        // ========================================================================
+    // ADMISSION DOMAIN
+    // ========================================================================
+    match /admission_waves/{waveId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+    }
+
+    match /admission_document_requirements/{reqId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && hasAnyRole(['super_admin', 'admin', 'tu']);
+    }
+
+    match /applicants/{applicantId} {
+      allow read: if request.auth != null && (resource.data.createdBy == request.auth.uid || hasAnyRole(['super_admin', 'admin', 'tu']));
+      allow create: if request.auth != null && request.resource.data.createdBy == request.auth.uid;
+      allow update: if request.auth != null && (resource.data.createdBy == request.auth.uid || hasAnyRole(['super_admin', 'admin', 'tu'])) && (request.resource.data.status == resource.data.status || hasAnyRole(['super_admin', 'admin', 'tu'])) && (request.resource.data.registrationNumber == resource.data.registrationNumber || hasAnyRole(['super_admin', 'admin', 'tu']));
+      allow delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+    }
+
+    match /registrations/{registrationId} {
+      allow read: if request.auth != null && (get(/databases/$(database)/documents/applicants/$(resource.data.applicantId)).data.createdBy == request.auth.uid || hasAnyRole(['super_admin', 'admin', 'tu']));
+      allow create: if request.auth != null && (get(/databases/$(database)/documents/applicants/$(request.resource.data.applicantId)).data.createdBy == request.auth.uid || hasAnyRole(['super_admin', 'admin', 'tu']));
+      allow update: if request.auth != null && hasAnyRole(['super_admin', 'admin', 'tu']);
+      allow delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+    }
+
+    match /users/{userId} {
+      allow read: if request.auth != null && (
+        request.auth.uid == userId ||
+        (resource != null && resource.data.get('authUid', '') == request.auth.uid) ||
+        (resource != null && resource.data.get('isOfflineAccount', false) == true) ||
+        hasAnyRole(['super_admin', 'admin', 'tu', 'teacher', 'curriculum', 'bendahara', 'parent', 'student']) ||
+        hasPermission('settings:write') ||
+        hasPermission('academic:read')
+      );
+      allow create: if request.auth != null && (request.auth.uid == userId || hasAnyRole(['super_admin', 'admin', 'tu']));
+      allow update: if request.auth != null && (
+        request.auth.uid == userId || 
+        (resource.data.get('isOfflineAccount', false) == true) ||
+        hasPermission('student:write') || 
+        hasPermission('teacher:write') || 
+        hasPermission('settings:write') ||
+        hasPermission('academic:write') ||
+        hasAnyRole(['super_admin', 'admin', 'tu'])
+      );
+      allow delete: if request.auth != null && (hasPermission('settings:write') || hasAnyRole(['super_admin']));
+    }
+    
+    match /curriculum_data/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'curriculum', 'teacher', 'student', 'parent'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasAnyRole(['super_admin', 'curriculum']));
+    }
+    match /classes/{classId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'curriculum', 'teacher', 'student', 'parent'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasAnyRole(['super_admin', 'curriculum', 'admin']));
+    }
+    match /attendance/{attendanceId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student', 'parent']) ||
+        (resource == null || resource.data.studentId == request.auth.uid)
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasPermission('student:write') || hasPermission('teacher:write') || hasAnyRole(['super_admin', 'teacher']));
+    }
+    match /tasks/{taskId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasPermission('student:write') || hasPermission('teacher:write') || hasAnyRole(['super_admin', 'teacher']));
+    }
+    match /grades/{gradeId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student', 'parent']) ||
+        (resource == null || resource.data.studentId == request.auth.uid)
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasPermission('student:write') || hasPermission('teacher:write') || hasAnyRole(['super_admin', 'teacher']));
+    }
+    match /schedules/{scheduleId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasAnyRole(['super_admin', 'curriculum', 'admin']));
+    }
+    
+    // ========================================================================
+    // ADMISSION DOMAIN (PPDB)
+    // ========================================================================
+    match /admission_waves/{waveId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (hasPermission('admission:write') || hasAnyRole(['super_admin', 'admin']));
+    }
+
+    match /admission_applicants/{applicantId} {
+      allow create: if request.auth != null && request.resource.data.createdBy == request.auth.uid;
+      allow read: if request.auth != null && (
+        resource.data.createdBy == request.auth.uid || 
+        hasPermission('admission:read') || 
+        hasAnyRole(['super_admin', 'admin'])
+      );
+      allow update: if request.auth != null && (
+        (resource.data.createdBy == request.auth.uid && request.resource.data.createdBy == request.auth.uid && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['status', 'approvedBy', 'selectedBy', 'enrolledBy', 'adminNotes', 'internalNotes'])) || 
+        hasPermission('admission:write') || 
+        hasPermission('admission:verify') || 
+        hasPermission('admission:select') || 
+        hasPermission('admission:enroll') || 
+        hasAnyRole(['super_admin', 'admin'])
+      );
+      allow delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+    }
+
+    match /admission_registrations/{registrationId} {
+      allow create: if request.auth != null && get(/databases/$(database)/documents/admission_applicants/$(request.resource.data.applicantId)).data.createdBy == request.auth.uid;
+      allow read: if request.auth != null && (
+        get(/databases/$(database)/documents/admission_applicants/$(resource.data.applicantId)).data.createdBy == request.auth.uid || 
+        hasPermission('admission:read') || 
+        hasAnyRole(['super_admin', 'admin'])
+      );
+      allow update, delete: if request.auth != null && (hasPermission('admission:write') || hasAnyRole(['super_admin', 'admin']));
+    }
+
+    // ========================================================================
+    // NEW ACADEMIC COLLECTIONS
+    // ========================================================================
+
+    match /academic_years/{docId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (
+        hasPermission('academic:period:write') || 
+        hasPermission('academic:period:activate') || 
+        hasPermission('academic:period:close') || 
+        hasPermission('academic:period:archive') || 
+        hasAnyRole(['super_admin', 'admin'])
+      );
+    }
+    match /academic_semesters/{docId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (
+        hasPermission('academic:period:write') || 
+        hasPermission('academic:period:activate') || 
+        hasPermission('academic:period:close') || 
+        hasPermission('academic:period:archive') || 
+        hasAnyRole(['super_admin', 'admin'])
+      );
+    }
+
+    match /academic_grades/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') || 
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'parent']) || 
+        resource.data.studentId == request.auth.uid
+      );
+      allow write: if request.auth != null && (
+        hasPermission('academic:write') || 
+        hasAnyRole(['super_admin', 'teacher'])
+      ) && (
+        resource == null || isDataMutable('academic', resource.data.semesterId)
+      ) && (
+        isDataMutable('academic', request.resource.data.semesterId)
+      );
+    }
+    match /academic_report_cards/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') || 
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'parent']) || 
+        resource.data.studentId == request.auth.uid
+      );
+      allow write: if request.auth != null && (
+        hasPermission('academic:write') || 
+        hasAnyRole(['super_admin', 'teacher'])
+      ) && (
+        resource == null || isDataMutable('academic', resource.data.semesterId)
+      ) && (
+        isDataMutable('academic', request.resource.data.semesterId)
+      );
+    }
+    match /academic_semesters/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasAnyRole(['super_admin', 'curriculum']));
+    }
+    match /academic_subjects/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasAnyRole(['super_admin', 'curriculum']));
+    }
+    match /academic_assessments/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasAnyRole(['super_admin', 'teacher', 'curriculum']));
+    }
+
+    match /attendance_logs/{logId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student', 'parent'])
+      );
+      allow write: if request.auth != null && (
+        hasPermission('academic:write') || hasAnyRole(['super_admin', 'teacher'])
+      ) && (
+        resource == null || isDataMutable('academic', resource.data.semesterId)
+      ) && (
+        isDataMutable('academic', request.resource.data.semesterId)
+      );
+    }
+    match /piket_logs/{logId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student', 'parent'])
+      );
+      allow write: if request.auth != null && (hasPermission('academic:write') || hasAnyRole(['super_admin', 'teacher']));
+    }
+
+    // Exam Management
+    match /exam_rooms/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student', 'parent', 'tu'])
+      );
+      allow write: if request.auth != null && (
+        hasPermission('academic:write') ||
+        hasAnyRole(['super_admin', 'admin', 'curriculum'])
+      );
+    }
+    match /exam_schedules/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student', 'parent', 'tu'])
+      );
+      allow write: if request.auth != null && (
+        hasPermission('academic:write') ||
+        hasAnyRole(['super_admin', 'admin', 'curriculum'])
+      );
+    }
+    match /exam_reports/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'curriculum', 'student', 'parent', 'tu'])
+      );
+      allow write: if request.auth != null && (
+        hasPermission('academic:write') ||
+        hasAnyRole(['super_admin', 'admin', 'curriculum', 'teacher'])
+      );
+    }
+
+    // ========================================================================
+    // FINANCE & OPERATIONS
+    // ========================================================================
+    match /payments/{paymentId} {
+      allow read: if request.auth != null && (
+        hasPermission('finance:read') || 
+        hasAnyRole(['super_admin', 'admin', 'bendahara', 'parent']) || 
+        (resource == null || resource.data.studentId == request.auth.uid)
+      );
+      allow create: if request.auth != null && (
+        hasPermission('finance:write') || 
+        hasAnyRole(['super_admin', 'bendahara']) || 
+        request.resource.data.studentId == request.auth.uid
+      ) && isDataMutable('finance', request.resource.data.semesterId);
+      allow update, delete: if request.auth != null && (
+        hasPermission('finance:write') || 
+        hasAnyRole(['super_admin', 'bendahara']) || 
+        resource.data.studentId == request.auth.uid
+      ) && isDataMutable('finance', resource.data.semesterId) && isDataMutable('finance', request.resource.data.semesterId);
+    }
+    match /billing_events/{eventId} {
+      allow read: if request.auth != null && (
+        hasPermission('finance:read') ||
+        hasAnyRole(['super_admin', 'admin', 'bendahara', 'student', 'parent'])
+      );
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_billings/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara']));
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_payments/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara', 'student', 'parent']));
+      allow create: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara', 'student', 'parent']));
+      allow update, delete: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_invoices/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara']));
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_ledgers/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara']));
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_journals/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara']));
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_cash_flows/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara']));
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_scholarships/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara']));
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    match /finance_payrolls/{docId} {
+      allow read: if request.auth != null && (hasPermission('finance:read') || hasAnyRole(['super_admin', 'admin', 'bendahara']));
+      allow write: if request.auth != null && (hasPermission('finance:write') || hasAnyRole(['super_admin', 'bendahara']));
+    }
+    
+    // ========================================================================
+    // DOCUMENTS & LETTERS
+    // ========================================================================
+    match /letter_templates/{templateId} {
+      allow read: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'tu', 'teacher', 'student', 'curriculum'])
+      );
+      allow write: if request.auth != null && hasAnyRole(['tu', 'super_admin', 'admin']);
+    }
+    match /teacher_documents/{docId} {
+      allow read: if request.auth != null && (
+        hasPermission('academic:read') || hasAnyRole(['super_admin', 'admin']) || (resource == null || resource.data.teacherId == request.auth.uid)
+      );
+      allow create: if request.auth != null && (
+        hasPermission('academic:write') || 
+        hasAnyRole(['super_admin']) || 
+        request.resource.data.teacherId == request.auth.uid
+      );
+      allow update, delete: if request.auth != null && (
+        hasPermission('academic:write') || 
+        hasAnyRole(['super_admin']) || 
+        resource.data.teacherId == request.auth.uid
+      );
+    }
+    match /letters/{docId} {
+      allow read: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'tu', 'teacher', 'student'])
+      );
+      allow write: if request.auth != null && hasAnyRole(['tu', 'super_admin', 'admin']);
+    }
+    match /doc_items/{docId} {
+      allow read: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'tu']) ||
+        (resource == null || resource.data.ownerId == request.auth.uid) ||
+        (resource != null && resource.data.ownerType == 'applicant' && get(/databases/$(database)/documents/applicants/$(resource.data.ownerId)).data.createdBy == request.auth.uid)
+      );
+      allow create: if request.auth != null && (
+        request.resource.data.ownerId == request.auth.uid ||
+        hasAnyRole(['tu', 'super_admin']) ||
+        (request.resource.data.ownerType == 'applicant' && get(/databases/$(database)/documents/applicants/$(request.resource.data.ownerId)).data.createdBy == request.auth.uid)
+      );
+      allow update: if request.auth != null && (
+        hasAnyRole(['tu', 'super_admin', 'admin']) ||
+        (
+          resource.data.ownerId == request.auth.uid ||
+          (resource.data.ownerType == 'applicant' && get(/databases/$(database)/documents/applicants/$(resource.data.ownerId)).data.createdBy == request.auth.uid)
+        ) && (
+          request.resource.data.status == resource.data.status && 
+          request.resource.data.verifiedBy == resource.data.verifiedBy && 
+          request.resource.data.verificationNotes == resource.data.verificationNotes
+        )
+      );
+      allow delete: if request.auth != null && (
+        hasAnyRole(['tu', 'super_admin']) ||
+        resource.data.ownerId == request.auth.uid ||
+        (resource.data.ownerType == 'applicant' && get(/databases/$(database)/documents/applicants/$(resource.data.ownerId)).data.createdBy == request.auth.uid)
+      );
+    }
+    match /doc_templates/{docId} {
+      allow read: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'tu', 'curriculum'])
+      );
+      allow write: if request.auth != null && hasAnyRole(['tu', 'super_admin', 'curriculum']);
+    }
+    match /doc_signatures/{docId} {
+      allow read: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'tu']) ||
+        (resource == null || resource.data.signerId == request.auth.uid || resource.data.ownerId == request.auth.uid)
+      );
+      allow create: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'tu']) ||
+        request.resource.data.signerId == request.auth.uid
+      );
+      allow update, delete: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'tu']) ||
+        resource.data.signerId == request.auth.uid
+      );
+    }
+
+    // ========================================================================
+    // NOTIFICATIONS
+    // ========================================================================
+    match /notification_jobs/{jobId} {
+      allow read: if request.auth != null && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if request.auth != null && (
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu', 'bendahara', 'curriculum']) ||
+        request.resource.data.userId == request.auth.uid
+      );
+      allow update: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow delete: if request.auth != null && (resource.data.userId == request.auth.uid || hasAnyRole(['super_admin']));
+    }
+    match /notification_preferences/{prefId} {
+      allow read: if request.auth != null && (resource == null || resource.data.userId == request.auth.uid);
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      allow update: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow delete: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+
+    // ========================================================================
+    // SETTINGS & TOOLS
+    // ========================================================================
+    match /teacher_tools/{toolId} {
+      allow read: if request.auth != null && (hasPermission('settings:read') || hasAnyRole(['super_admin', 'admin', 'teacher']));
+      allow write: if request.auth != null && (hasPermission('settings:write') || hasAnyRole(['super_admin', 'admin']));
+    }
+    match /settings/{settingId} {
+      allow read: if request.auth != null && (hasPermission('settings:read') || hasAnyRole(['super_admin', 'admin', 'teacher', 'tu', 'bendahara', 'curriculum', 'student']));
+      allow write: if request.auth != null && (hasPermission('settings:write') || hasAnyRole(['super_admin', 'admin']));
+    }
+    
+    // ========================================================================
+    // ========================================================================
+
+    // PARENT DOMAIN
+
+    // ========================================================================
+
+    match /parents/{parentId} {
+
+      allow read: if request.auth != null && (
+
+        resource.data.userId == request.auth.uid || 
+
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu', 'bendahara', 'curriculum'])
+
+      );
+
+      allow create: if request.auth != null && (
+
+        request.resource.data.userId == request.auth.uid || 
+
+        hasAnyRole(['super_admin', 'admin'])
+
+      );
+
+      allow update: if request.auth != null && (
+
+        resource.data.userId == request.auth.uid || 
+
+        hasAnyRole(['super_admin', 'admin'])
+
+      );
+
+      allow delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+
+    }
+
+    
+
+    match /parent_student_relations/{relationId} {
+      allow read: if request.auth != null && (
+        resource.data.parentId == request.auth.uid ||
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu', 'bendahara', 'curriculum', 'parent'])
+      );
+      allow create: if request.auth != null && (
+        request.resource.data.parentId == request.auth.uid ||
+        hasAnyRole(['super_admin', 'admin'])
+      );
+      allow update, delete: if request.auth != null && (
+        resource.data.parentId == request.auth.uid ||
+        hasAnyRole(['super_admin', 'admin'])
+      );
+    }
+
+
+
+    match /parent_threads/{threadId} {
+
+      allow read: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(resource.data.parentId)).data.userId == request.auth.uid ||
+
+        resource.data.targetUserId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu'])
+
+      );
+
+      allow create: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(request.resource.data.parentId)).data.userId == request.auth.uid ||
+
+        request.resource.data.targetUserId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin'])
+
+      );
+
+      allow update: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(resource.data.parentId)).data.userId == request.auth.uid ||
+
+        resource.data.targetUserId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu'])
+
+      );
+
+      allow delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+
+    }
+
+
+
+    match /parent_messages/{messageId} {
+
+      allow read: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(get(/databases/$(database)/documents/parent_threads/$(resource.data.threadId)).data.parentId)).data.userId == request.auth.uid ||
+
+        get(/databases/$(database)/documents/parent_threads/$(resource.data.threadId)).data.targetUserId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu'])
+
+      );
+
+      allow create: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(get(/databases/$(database)/documents/parent_threads/$(request.resource.data.threadId)).data.parentId)).data.userId == request.auth.uid ||
+
+        get(/databases/$(database)/documents/parent_threads/$(request.resource.data.threadId)).data.targetUserId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu'])
+
+      );
+
+      allow update, delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+
+    }
+
+
+
+    match /parent_notifications/{notificationId} {
+
+      allow read: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(resource.data.parentId)).data.userId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin'])
+
+      );
+
+      allow create: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+
+      allow update: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(resource.data.parentId)).data.userId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin'])
+
+      );
+
+      allow delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+
+    }
+
+
+
+    match /parent_approvals/{approvalId} {
+
+      allow read: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(resource.data.parentId)).data.userId == request.auth.uid ||
+
+        resource.data.approverId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu', 'bendahara'])
+
+      );
+
+      allow create: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(request.resource.data.parentId)).data.userId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin'])
+
+      );
+
+      allow update: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(resource.data.parentId)).data.userId == request.auth.uid ||
+
+        resource.data.approverId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin', 'teacher', 'tu', 'bendahara'])
+
+      );
+
+      allow delete: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+
+    }
+
+
+
+    match /parent_timeline/{timelineId} {
+
+      allow read: if request.auth != null && (
+
+        get(/databases/$(database)/documents/parents/$(resource.data.parentId)).data.userId == request.auth.uid ||
+
+        hasAnyRole(['super_admin', 'admin'])
+
+      );
+
+      allow write: if request.auth != null && hasAnyRole(['super_admin', 'admin']);
+
+    }
+
+
+
+    // RBAC COLLECTIONS
+    // ========================================================================
+    match /roles/{roleId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (hasPermission('settings:write') || hasAnyRole(['super_admin']));
+    }
+
+    match /permissions/{permissionId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (hasPermission('settings:write') || hasAnyRole(['super_admin']));
+    }
+
+    match /role_permissions/{rpId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (hasPermission('settings:write') || hasAnyRole(['super_admin']));
+    }
+
+    match /user_roles/{urId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && (hasPermission('settings:write') || hasAnyRole(['super_admin']));
+    }
+
+    // ========================================================================
+    // STUDENT DOMAIN
+    // ========================================================================
+    match /student_academic_profiles/{docId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && hasAnyRole(['super_admin', 'admin', 'tu']);
+    }
+    match /student_enrollments/{docId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && hasAnyRole(['super_admin', 'admin', 'tu']);
+    }
+    // ========================================================================
+    // PLATFORM FOUNDATION (MULTI-TENANT)
+    // ========================================================================
+    match /tenants/{tenantId} {
+      allow read: if request.auth != null && canAccessTenant(tenantId);
+      allow create: if request.auth != null;
+      allow update, delete: if request.auth != null && isPlatformAdmin();
+    }
+    match /tenant_memberships/{membershipId} {
+      allow read: if request.auth != null && (resource.data.userId == request.auth.uid || isPlatformAdmin() || (hasAnyRole(['admin', 'super_admin']) && canAccessTenant(resource.data.tenantId)));
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null && isPlatformAdmin();
+    }
+    match /tenant_subscriptions/{subId} {
+      allow read: if request.auth != null && (isPlatformAdmin() || canAccessTenant(resource.data.tenantId));
+      allow write: if request.auth != null && isPlatformAdmin();
+    }
+    match /platform_releases/{releaseId} {
+      allow read: if request.auth != null && isPlatformAdmin();
+      allow write: if request.auth != null && isPlatformAdmin();
+    }
+    match /platform_modules/{moduleId} {
+      allow read: if request.auth != null && isPlatformAdmin();
+      allow write: if request.auth != null && isPlatformAdmin();
+    }
+
+    // ========================================================================
+    // WEBSITE & CMS DOMAIN
+    // ========================================================================
+    match /tenant_public_profiles/{tenantId} {
+      allow read: if true;
+      allow create: if request.auth != null;
+      allow update, delete: if request.auth != null && canAccessTenant(tenantId) && (hasPermission('website:manage') || hasAnyRole(['super_admin', 'admin']));
+    }
+    match /tenant_cms_contents/{contentId} {
+      allow read: if (resource.data.status == 'PUBLISHED') || 
+                  (request.auth != null && canAccessTenant(resource.data.tenantId) && (hasPermission('website:read') || hasPermission('website:manage') || hasAnyRole(['super_admin', 'admin'])));
+      allow create: if request.auth != null && canAccessTenant(request.resource.data.tenantId) && (hasPermission('website:manage') || hasAnyRole(['super_admin', 'admin']));
+      allow update: if request.auth != null && canAccessTenant(resource.data.tenantId) && (hasPermission('website:manage') || hasAnyRole(['super_admin', 'admin'])) && 
+                       (request.resource.data.status != 'PUBLISHED' || hasPermission('website:publish') || hasAnyRole(['super_admin', 'admin']));
+      allow delete: if request.auth != null && canAccessTenant(resource.data.tenantId) && (hasPermission('website:manage') || hasAnyRole(['super_admin', 'admin']));
+    }
+  }
+}

@@ -1,0 +1,11 @@
+export * from './FirestoreRepository';
+import { Applicant } from '../entities/Applicant';
+import { Registration } from '../entities/Registration';
+import { AdmissionWave } from '../entities/AdmissionWave';
+import { AdmissionDocumentRequirement } from '../entities/AdmissionDocumentRequirement';
+import { FirestoreRepository } from './FirestoreRepository';
+export const applicantRepo = new FirestoreRepository<Applicant>('admission_applicants');
+export const registrationRepo = new FirestoreRepository<Registration>('admission_registrations');
+export const admissionWaveRepo = new FirestoreRepository<AdmissionWave>('admission_waves');
+export const documentRequirementRepo = new FirestoreRepository<AdmissionDocumentRequirement>('admission_document_requirements');
+export * from './AdmissionAuditRepository';

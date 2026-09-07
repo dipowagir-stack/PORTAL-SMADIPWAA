@@ -1,0 +1,8 @@
+{
+  "name": "Remix PORTAL SEKOLAH SMAS ISLAM DIPONEGORO WAGIR",
+  "description": "EFEKTIF EFISIEN DAN PROGRESIV",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
