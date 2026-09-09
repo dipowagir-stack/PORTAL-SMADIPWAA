@@ -64,9 +64,50 @@ export async function executeQuery<T = any>(sql: string, params: any[] = []): Pr
   return [];
 }
 
+import fs from 'fs';
+import path from 'path';
+
 // Memory-backed operations for standalone resilience
+function loadUsersFromSql() {
+  if (memoryStore['users'] && Object.keys(memoryStore['users']).length > 0) return;
+  try {
+    const sqlPath = path.join(process.cwd(), 'scripts', 'users_migration.sql');
+    if (fs.existsSync(sqlPath)) {
+      const content = fs.readFileSync(sqlPath, 'utf8');
+      const regex = /VALUES \('([^']+)',\s*(NULL|'[^']*'),\s*'([^']+)',\s*'([^']+)',\s*'([^']+)',\s*'([^']+)',\s*'([^']+)'/g;
+      let match;
+      if (!memoryStore['users']) memoryStore['users'] = {};
+      while ((match = regex.exec(content)) !== null) {
+        const id = match[1];
+        const tenantId = match[2] === 'NULL' ? null : match[2].replace(/'/g, '');
+        const authUid = match[3];
+        const email = match[4];
+        const passwordHash = match[5];
+        const name = match[6];
+        const primaryRole = match[7];
+        memoryStore['users'][id] = {
+          id,
+          tenant_id: tenantId,
+          auth_uid: authUid,
+          email,
+          password_hash: passwordHash,
+          name,
+          primary_role: primaryRole,
+          status: 'ACTIVE',
+        };
+      }
+      console.log(`[SchoolSaaS DB] Preloaded ${Object.keys(memoryStore['users']).length} users into local memory store.`);
+    }
+  } catch (err) {
+    console.warn('[SchoolSaaS DB] Notice while preloading users from SQL:', err);
+  }
+}
+
 export const localStore = {
   getCollection(name: string) {
+    if (name === 'users') {
+      loadUsersFromSql();
+    }
     if (!memoryStore[name]) {
       memoryStore[name] = {};
     }

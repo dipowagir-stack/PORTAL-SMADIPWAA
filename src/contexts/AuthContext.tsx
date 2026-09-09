@@ -31,6 +31,7 @@ interface AuthContextType {
   switchRole: (role: UserRole) => void;
   refreshProfile: () => Promise<void>;
   hasPermission: (permission: string) => boolean;
+  loginDecoupled: (user: any) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -42,6 +43,7 @@ const AuthContext = createContext<AuthContextType>({
   switchRole: () => {},
   refreshProfile: async () => {},
   hasPermission: () => false,
+  loginDecoupled: async () => {},
 });
 
 export const useAuth = () => useContext(AuthContext);
@@ -125,40 +127,45 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
   };
 
+  const loginDecoupled = async (savedUser: any) => {
+    if (!savedUser) return;
+    const dummyUser = {
+      uid: savedUser.uid,
+      email: savedUser.email,
+      displayName: savedUser.name,
+      photoURL: savedUser.photoUrl || '',
+    } as unknown as User;
+    setUser(dummyUser);
+
+    const prof: UserProfile = {
+      uid: savedUser.uid,
+      email: savedUser.email,
+      name: savedUser.name,
+      role: (savedUser.role as UserRole) || 'teacher',
+      additionalRoles: (savedUser.additionalRoles as UserRole[]) || [],
+      waNumber: savedUser.waNumber,
+      waParentNumber: savedUser.waParentNumber,
+      nisn: savedUser.nisn,
+      photoUrl: savedUser.photoUrl,
+      className: savedUser.className,
+      points: savedUser.points || 0,
+      createdAt: Date.now(),
+    };
+    setProfile(prof);
+    setActiveRole(prof.role);
+    if (prof.role) {
+      const perms = await getRolePermissions(prof.role);
+      setPermissions(perms);
+    }
+    setLoading(false);
+  };
+
   useEffect(() => {
     // 1. First check if decoupled token/session exists
     const checkDecoupledSession = async () => {
       const savedUser = apiClient.getSavedUser();
       if (savedUser && !user) {
-        const dummyUser = {
-          uid: savedUser.uid,
-          email: savedUser.email,
-          displayName: savedUser.name,
-          photoURL: savedUser.photoUrl || '',
-        } as unknown as User;
-        setUser(dummyUser);
-
-        const prof: UserProfile = {
-          uid: savedUser.uid,
-          email: savedUser.email,
-          name: savedUser.name,
-          role: (savedUser.role as UserRole) || 'teacher',
-          additionalRoles: (savedUser.additionalRoles as UserRole[]) || [],
-          waNumber: savedUser.waNumber,
-          waParentNumber: savedUser.waParentNumber,
-          nisn: savedUser.nisn,
-          photoUrl: savedUser.photoUrl,
-          className: savedUser.className,
-          points: savedUser.points || 0,
-          createdAt: Date.now(),
-        };
-        setProfile(prof);
-        setActiveRole(prof.role);
-        if (prof.role) {
-          const perms = await getRolePermissions(prof.role);
-          setPermissions(perms);
-        }
-        setLoading(false);
+        await loginDecoupled(savedUser);
       }
     };
     checkDecoupledSession();
@@ -242,9 +249,15 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           setPermissions([]);
         }
       } else {
-        setProfile(null);
-        setActiveRole(null);
-        setPermissions([]);
+        // When Firebase currentUser is null, preserve active decoupled session if present
+        const savedUser = apiClient.getSavedUser();
+        if (savedUser) {
+          await loginDecoupled(savedUser);
+        } else {
+          setProfile(null);
+          setActiveRole(null);
+          setPermissions([]);
+        }
       }
       setLoading(false);
     });
@@ -252,7 +265,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, activeRole, permissions, switchRole, refreshProfile, hasPermission }}>
+    <AuthContext.Provider value={{ user, profile, loading, activeRole, permissions, switchRole, refreshProfile, hasPermission, loginDecoupled }}>
       {children}
     </AuthContext.Provider>
   );

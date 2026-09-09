@@ -7,7 +7,7 @@ import { loginWithGoogle, loginWithEmailPassword, logout } from '../lib/firebase
 import { TenantPublicProfile } from '../domains/website/types';
 
 export default function Login({ tenantProfile }: { tenantProfile?: TenantPublicProfile }) {
-  const { user, profile, loading, refreshProfile } = useAuth();
+  const { user, profile, loading, refreshProfile, loginDecoupled } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const [error, setError] = useState('');
@@ -16,23 +16,12 @@ export default function Login({ tenantProfile }: { tenantProfile?: TenantPublicP
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
-  // If user is logged in to global SaaS login but is not a platform admin, sign them out.
+  // If user is logged in to global SaaS login
   useEffect(() => {
-    if (user && !loading && !tenantProfile) {
-      // If profile is loaded, check role. If profile is null, they definitely aren't a platform admin yet.
-      // Wait, if profile is null, maybe they are a new platform admin? 
-      // Typically platform admins are seeded in DB. If they don't have a profile, they can't access platform anyway.
-      const isPlatformUser = profile ? ['platform_admin', 'platform_support', 'platform_engineer'].includes(profile.role || '') : false;
-      
-      if (!isPlatformUser) {
-        logout().then(() => {
-          setError('Akses Ditolak: Halaman ini khusus untuk Platform Administrator. Silakan akses URL khusus sekolah Anda (misal: /s/nama-sekolah/login) untuk masuk atau mendaftar.');
-          setIsLoggingIn(false);
-        }).catch(err => {
-          console.error("Logout error", err);
-          setIsLoggingIn(false);
-        });
-      }
+    if (user && !loading && !tenantProfile && profile) {
+      const isPlatformUser = ['platform_admin', 'platform_support', 'platform_engineer'].includes(profile.role || '');
+      // If it's a platform user, redirect will happen below.
+      // If it's a school staff/teacher/student/admin, redirect to /app
     }
   }, [user, profile, loading, tenantProfile]);
 
@@ -46,8 +35,10 @@ export default function Login({ tenantProfile }: { tenantProfile?: TenantPublicP
       if (['platform_admin', 'platform_support', 'platform_engineer'].includes(profile.role || '')) {
         return <Navigate to="/platform" replace />;
       }
-      // If not platform admin, useEffect will log them out and we show the error message.
-      // Do not redirect to /app so they can see the error.
+      if (profile.role === 'applicant') {
+        return <Navigate to="/ppdb/dashboard" replace />;
+      }
+      return <Navigate to="/app" replace />;
     } else {
       // If it's a tenant login (tenantProfile exists)
       if (profile.role === 'applicant') {
@@ -62,10 +53,7 @@ export default function Login({ tenantProfile }: { tenantProfile?: TenantPublicP
 
   // Handle users who haven't set up profile yet
   if (user && !profile && !error) {
-    if (!tenantProfile) {
-      // It's a SaaS login. We don't redirect to setup-profile because they shouldn't be here.
-      // The useEffect will log them out and show the error.
-    } else {
+    if (tenantProfile) {
       return <Navigate to={`/setup-profile${location.search}`} replace />;
     }
   }
@@ -91,10 +79,12 @@ export default function Login({ tenantProfile }: { tenantProfile?: TenantPublicP
     setIsLoggingIn(true);
     setError('');
     try {
-      await loginWithEmailPassword(email.trim(), password, tenantProfile?.id);
-      await refreshProfile();
-      // Trigger full state update
-      window.location.reload();
+      const authResult = await loginWithEmailPassword(email.trim(), password, tenantProfile?.id);
+      if (authResult?.user) {
+        await loginDecoupled(authResult.user);
+      } else {
+        await refreshProfile();
+      }
     } catch (err: any) {
       setError(err.message || 'Email atau password tidak sesuai.');
       setIsLoggingIn(false);
